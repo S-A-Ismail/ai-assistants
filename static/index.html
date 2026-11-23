@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Studio</title>
+<link rel="stylesheet" href="/static/studio.css">
+</head>
+<body>
+<header>
+  <div class="brand">AI Studio <span class="sub">local models · RX 580</span></div>
+  <div id="health" class="health">checking…</div>
+</header>
+
+<nav id="tabs" role="tablist"></nav>
+
+<main>
+  <section class="left">
+    <div id="tools" class="tools"></div>
+    <form id="form" class="card form" autocomplete="off">
+      <div id="toolhead"></div>
+      <div id="fields"></div>
+      <div class="actions">
+        <button type="submit" id="go">Queue job</button>
+        <span id="formmsg" class="msg"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="right">
+    <div class="jobshead">
+      <h2>Jobs</h2>
+      <label class="filter"><input type="checkbox" id="onlytab"> this tab only</label>
+    </div>
+    <div id="jobs"></div>
+  </section>
+</main>
+
+<template id="jobtpl">
+  <article class="card job">
+    <div class="jobtop">
+      <div><strong class="jtitle"></strong> <span class="jmodel"></span></div>
+      <div class="jstatus"></div>
+    </div>
+    <div class="jprompt"></div>
+    <div class="bar"><i></i></div>
+    <div class="jout"></div>
+    <div class="jactions"></div>
+  </article>
+</template>
+
+<script src="/static/studio.js"></script>
+</body>
+</html>

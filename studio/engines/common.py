@@ -1,0 +1,151 @@
+"""Shared plumbing for engines: running native binaries with progress and cancellation."""
+
+import os
+import re
+import subprocess
+import threading
+from collections import deque
+from pathlib import Path
+from typing import Callable
+
+import imageio_ffmpeg
+
+from ..config import ENGINES_DIR
+
+ProgressFn = Callable[[float, str], None]
+
+
+class Cancelled(Exception):
+    pass
+
+
+class EngineError(RuntimeError):
+    pass
+
+
+class Context:
+    """What an engine gets from the job runner: where to write, how to report, how to stop."""
+
+    def __init__(self, workdir: Path, progress: ProgressFn, cancel: threading.Event):
+        self.workdir = workdir
+        self.progress = progress
+        self.cancel = cancel
+
+    def check(self) -> None:
+        if self.cancel.is_set():
+            raise Cancelled()
+
+
+def exe(engine: str, name: str) -> Path:
+    p = ENGINES_DIR / engine / name
+    if not p.exists():
+        raise EngineError(f"{p} is missing. Run: python scripts/fetch_engines.py {engine}")
+    return p
+
+
+# "12/20", as printed by sd.cpp, llama.cpp and whisper.cpp progress bars.
+_STEP = re.compile(r"(\d+)\s*/\s*(\d+)")
+_PCT = re.compile(r"progress\s*=\s*(\d+)%")
+
+
+def run(
+    cmd: list[str],
+    ctx: Context,
+    *,
+    label: str = "",
+    span: tuple[float, float] = (0.0, 1.0),
+    parse: Callable[[str], float | None] | None = None,
+    cwd: Path | None = None,
+    env: dict | None = None,
+) -> str:
+    """Run a native engine, mapping its own progress output onto [span[0], span[1]].
+
+    Returns the combined output. Raises Cancelled if the job is cancelled (the process
+    is killed), or EngineError with the tail of the output if it exits non-zero.
+    """
+    lo, hi = span
+    tail: deque[str] = deque(maxlen=40)
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.Popen(
+        [str(c) for c in cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=str(cwd) if cwd else None,
+        env={**os.environ, **(env or {})},
+        creationflags=flags,
+    )
+
+    def watch_cancel() -> None:
+        ctx.cancel.wait()
+        if proc.poll() is None:
+            proc.kill()
+
+    threading.Thread(target=watch_cancel, daemon=True).start()
+
+    # Progress bars redraw with \r, so split on both \r and \n.
+    buf = b""
+    assert proc.stdout is not None
+    while True:
+        chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
+        if not chunk:
+            break
+        buf += chunk
+        parts = re.split(rb"[\r\n]", buf)
+        buf = parts.pop()
+        for raw in parts:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            tail.append(line)
+            frac = parse(line) if parse else default_parse(line)
+            if frac is not None:
+                ctx.progress(lo + (hi - lo) * max(0.0, min(1.0, frac)), label)
+    if buf:
+        tail.append(buf.decode("utf-8", "replace").strip())
+    code = proc.wait()
+    if ctx.cancel.is_set():
+        raise Cancelled()
+    out = "\n".join(tail)
+    if code != 0:
+        raise EngineError(f"{Path(cmd[0]).name} exited with {code}:\n{out}")
+    return out
+
+
+def default_parse(line: str) -> float | None:
+    m = _PCT.search(line)
+    if m:
+        return int(m.group(1)) / 100
+    # Only trust "a/b" on lines that look like a progress bar, not on arbitrary log text.
+    if "it]" in line or "s/it" in line or "it/s" in line or "|" in line:
+        m = _STEP.search(line)
+        if m and int(m.group(2)) > 0:
+            return int(m.group(1)) / int(m.group(2))
+    return None
+
+
+def ffmpeg() -> str:
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def to_wav(src: Path, dst: Path, ctx: Context, rate: int = 16000) -> Path:
+    """Decode any audio/video ffmpeg understands (incl. WhatsApp .ogg/opus) to mono PCM WAV."""
+    run([ffmpeg(), "-y", "-i", src, "-ac", "1", "-ar", rate, "-c:a", "pcm_s16le", dst], ctx, parse=lambda _: None)
+    return dst
+
+
+def to_wav16k(src: Path, dst: Path, ctx: Context) -> Path:
+    return to_wav(src, dst, ctx, 16000)
+
+
+def webm_to_mp4(src: Path, dst: Path, ctx: Context) -> Path:
+    run(
+        [ffmpeg(), "-y", "-i", src, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-movflags", "+faststart", dst],
+        ctx,
+        parse=lambda _: None,
+    )
+    return dst
+
+
+def wav_to_mp3(src: Path, dst: Path, ctx: Context) -> Path:
+    run([ffmpeg(), "-y", "-i", src, "-c:a", "libmp3lame", "-q:a", "2", dst], ctx, parse=lambda _: None)
+    return dst

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# downloaded engines, job outputs, logs
+runtime/
+data/
+logs/
+
+# local settings (API key, paths)
+.env
