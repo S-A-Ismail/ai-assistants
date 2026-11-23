@@ -3,10 +3,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 
-# downloaded engines, job outputs, logs
-runtime/
-data/
-logs/
+# downloaded engines, job outputs, logs (top level only: studio/data/ is source)
+/runtime/
+/data/
+/logs/
 
 # local settings (API key, paths)
 .env
