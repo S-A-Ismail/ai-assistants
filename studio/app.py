@@ -14,6 +14,7 @@
 
 import asyncio
 import contextlib
+import os
 import shutil
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import UploadFile
 
 from . import config, mcp_server, models
-from .engines import translate
+from .engines import translate, voice
 from .jobs import JobManager
 from .tools import TOOLS, kokoro_voice_options
 
@@ -36,6 +37,9 @@ mcp_app = mcp.streamable_http_app(streamable_http_path="/mcp", host=config.HOST)
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Chatterbox's decoder takes minutes to load; start that now rather than on the first job.
+    if os.environ.get("STUDIO_WARMUP", "1") != "0":
+        voice.warm_up_chatterbox()
     async with mcp.session_manager.run():
         yield
     translate.stop()

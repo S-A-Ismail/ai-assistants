@@ -1,7 +1,10 @@
-"""Voice-over: Kokoro-82M and Chatterbox Multilingual, both ONNX on ONNX Runtime + DirectML.
+"""Voice-over: Kokoro-82M (ONNX Runtime + DirectML) and Chatterbox Multilingual (ONNX, CPU).
 
-DirectML is how ONNX Runtime reaches the RX 580 on Windows. If a model can't be placed on
-it, the session falls back to the CPU rather than failing.
+DirectML is how ONNX Runtime reaches the RX 580 on Windows. Kokoro runs there. Chatterbox
+runs on the CPU instead: DirectML can't execute its language model's GroupQueryAttention
+nodes, and its decoder takes ~4-5 minutes just to build a session on either device. So the
+Chatterbox sessions are built once, kept for the life of the server (they use no VRAM), and
+warmed up in the background at startup.
 """
 
 import re
@@ -15,17 +18,20 @@ import soundfile as sf
 from .. import config, models
 from .common import Context, to_wav, wav_to_mp3
 
-_sessions: dict[str, object] = {}
+_sessions: dict[str, object] = {}  # GPU sessions: dropped before other engines run
 _lock = threading.Lock()
+_cpu_sessions: dict[str, object] = {}  # CPU sessions: kept for the life of the process
+_cpu_lock = threading.Lock()
 
 
-def _session(path: Path) -> ort.InferenceSession:
+def _session(path: Path, gpu: bool = True) -> ort.InferenceSession:
     opts = ort.SessionOptions()
     # DirectML requires these two settings.
     opts.enable_mem_pattern = False
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     opts.intra_op_num_threads = config.CPU_THREADS
-    providers = [p for p in ("DmlExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
+    wanted = ("DmlExecutionProvider", "CPUExecutionProvider") if gpu else ("CPUExecutionProvider",)
+    providers = [p for p in wanted if p in ort.get_available_providers()]
     try:
         return ort.InferenceSession(str(path), opts, providers=providers)
     except Exception:
@@ -114,18 +120,32 @@ START, STOP = 6561, 6562
 LAYERS, KV_HEADS, HEAD_DIM = 30, 16, 64
 
 
+CHATTERBOX_FILES = ("chatterbox-speech-encoder", "chatterbox-embed", "chatterbox-lm", "chatterbox-decoder", "chatterbox-tokenizer")
+
+
 def _chatterbox():
     from tokenizers import Tokenizer
 
-    if "chatterbox" not in _sessions:
-        _sessions["chatterbox"] = {
-            "speech_encoder": _session(models.path("chatterbox-speech-encoder")),
-            "embed": _session(models.path("chatterbox-embed")),
-            "lm": _session(models.path("chatterbox-lm")),
-            "decoder": _session(models.path("chatterbox-decoder")),
-            "tokenizer": Tokenizer.from_file(str(models.path("chatterbox-tokenizer"))),
-        }
-    return _sessions["chatterbox"]
+    with _cpu_lock:  # a warm-up may already be building it; wait for that instead of building twice
+        if "chatterbox" not in _cpu_sessions:
+            _cpu_sessions["chatterbox"] = {
+                "speech_encoder": _session(models.path("chatterbox-speech-encoder"), gpu=False),
+                "embed": _session(models.path("chatterbox-embed"), gpu=False),
+                "lm": _session(models.path("chatterbox-lm"), gpu=False),
+                "decoder": _session(models.path("chatterbox-decoder"), gpu=False),  # the ~4-5 min one
+                "tokenizer": Tokenizer.from_file(str(models.path("chatterbox-tokenizer"))),
+            }
+        return _cpu_sessions["chatterbox"]
+
+
+def chatterbox_loaded() -> bool:
+    return "chatterbox" in _cpu_sessions
+
+
+def warm_up_chatterbox() -> None:
+    """Build the Chatterbox sessions in the background so the first voice-over doesn't wait."""
+    if models.present(*CHATTERBOX_FILES, "chatterbox-lm-data", "chatterbox-decoder-data") and not chatterbox_loaded():
+        threading.Thread(target=_chatterbox, daemon=True, name="chatterbox-warmup").start()
 
 
 def _dtype(session: ort.InferenceSession, name: str):
@@ -205,12 +225,12 @@ def chatterbox(
     ref, _ = sf.read(ref_wav, dtype="float32")
     ref = ref[None, : SR * 20]  # the encoder only needs a short sample
 
-    with _lock:
-        ctx.progress(0.05, "loading Chatterbox")
-        m = _chatterbox()
-        pieces = _sentences(text, 250)
-        out = []
-        for i, piece in enumerate(pieces):
-            ctx.progress(0.1 + 0.85 * i / len(pieces), f"speaking part {i + 1} of {len(pieces)}")
-            out += [_speak_chunk(m, piece, language, ref, exaggeration, 1000, ctx), np.zeros(int(SR * 0.2), dtype=np.float32)]
+    # CPU-only and kept loaded, so no GPU lock is needed; jobs are serialised by the queue anyway.
+    ctx.progress(0.05, "speaking" if chatterbox_loaded() else "loading Chatterbox (one-time, ~5 min after a restart)")
+    m = _chatterbox()
+    pieces = _sentences(text, 250)
+    out = []
+    for i, piece in enumerate(pieces):
+        ctx.progress(0.1 + 0.85 * i / len(pieces), f"speaking part {i + 1} of {len(pieces)}")
+        out += [_speak_chunk(m, piece, language, ref, exaggeration, 1000, ctx), np.zeros(int(SR * 0.2), dtype=np.float32)]
     return {**_finish(ctx, np.concatenate(out), SR), "language": language, "cloned": reference is not None}

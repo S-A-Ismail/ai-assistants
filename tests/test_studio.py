@@ -14,6 +14,7 @@ import pytest
 
 # Isolate job data before the studio modules read their config.
 os.environ["STUDIO_DATA_DIR"] = tempfile.mkdtemp(prefix="studio-test-")
+os.environ["STUDIO_WARMUP"] = "0"  # don't spend minutes loading Chatterbox during tests
 
 from jinja2 import Environment  # noqa: E402
 from PIL import Image  # noqa: E402
@@ -66,6 +67,44 @@ def test_progress_parse():
     assert default_parse("  |=====>     | 3/8 - 41.20s/it") == pytest.approx(3 / 8)
     assert default_parse("whisper_print_progress_callback: progress =  45%") == pytest.approx(0.45)
     assert default_parse("loaded 3/8 tensors") is None  # not a progress bar
+    assert default_parse("|############    | 123/453 - 181.58MB/s") is None  # weight loading, not progress
+
+
+@pytest.mark.skipif(os.name != "nt", reason="suspend/resume is Windows-only")
+def test_throttle_pauses_engine(tmp_path):
+    """The GPU rest must suspend the engine between steps and tiles, grouping short ones."""
+    import sys
+
+    from studio.engines.common import run
+
+    # Mimics sd.cpp: a loading bar, 3 sampling steps of 0.5 s, then 6 VAE tiles of 0.2 s. The work
+    # burns CPU time, which (unlike a sleep) stops while the process is suspended.
+    child = (
+        "import time\n"
+        "def work(s):\n"
+        "    t = time.process_time()\n"
+        "    while time.process_time() - t < s: pass\n"
+        "for i in range(5): print(f'|##   | {i}/5 - 100.0MB/s', flush=True); time.sleep(0.2)\n"
+        "print('loading tensors completed', flush=True)\n"
+        "for i in range(1, 4): work(0.5); print(f'|===>  | {i}/3 - 0.50s/it', flush=True)\n"
+        "print('sampling completed', flush=True)\n"
+        "for i in range(1, 7): work(0.2); print(f'|=>    | {i}/6 - 0.20s/it', flush=True)\n"
+        "print('computing vae decode graph completed', flush=True)\n"
+    )
+    script = tmp_path / "child.py"
+    script.write_text(child)
+    # The venv's python.exe is a launcher that starts the real interpreter as a child; suspend that.
+    python = getattr(sys, "_base_executable", sys.executable)
+    t0 = time.monotonic()
+    run([python, "-u", str(script)], ctx(tmp_path), duty=(1.0, 0.35))
+    took = time.monotonic() - t0
+    log = (tmp_path / "engine.log").read_text()
+    rests = [line for line in log.splitlines() if "GPU rest" in line]
+    # After every sampling step but the last; tiles grouped in pairs (0.4 s of work >= 0.35);
+    # nothing for the loading bar or after the final step or tile.
+    assert [r.split("after ")[1].split(" ")[0] for r in rests] == ["1/3", "2/3", "2/6", "4/6"], rests
+    assert took > 1 + 2.7 + 1.8  # loading + work + rests
+    assert "exit code 0" in log
 
 
 # ---------------------------------------------------------------- input validation
@@ -201,10 +240,13 @@ def test_validation_errors_are_400(client):
     assert client.post("/api/jobs", data={"tool": "nope", "prompt": "x"}).status_code == 404
 
 
-def test_tool_not_ready_is_400(client):
+def test_tool_not_ready_is_400(client, monkeypatch):
+    # Force "not ready" whatever is on disk: a real tool here would start a real GPU job.
+    t = tools.BY_ID["flux-krea"]
+    monkeypatch.setattr(t, "status", lambda: "model files missing")
+    monkeypatch.setattr(t, "run", lambda c, a: pytest.fail("a real engine was started"))
     r = client.post("/api/jobs", data={"tool": "flux-krea", "prompt": "x"})
-    if tools.BY_ID["flux-krea"].status() is not None:
-        assert r.status_code == 400 and "isn't ready" in r.json()["detail"]
+    assert r.status_code == 400 and "isn't ready" in r.json()["detail"]
 
 
 def test_upload_and_job_reference(client, monkeypatch):

@@ -48,8 +48,26 @@ def snap(v: float, multiple: int) -> int:
 
 
 def _sd(ctx: Context, args: list, out: Path, label: str, span=(0.0, 1.0)) -> Path:
+    # On the GPU the VAE decode must be tiled: each tile is its own short GPU job, so the throttle
+    # can rest the card between tiles (an untiled decode is one long job). On the CPU, tiling only
+    # repeats work (a 544 px decode took 88 s tiled), so it's left off there for images. The
+    # video tools add it themselves, since an untiled decode of many frames needs a lot of RAM.
+    if config.VAE_DEVICE != "cpu" and "--vae-tiling" not in args:
+        args = [*args, "--vae-tiling"]
+    if "upscale" not in args and "--backend" not in args:
+        # The text encoder runs on the CPU: it runs once per job, and it leaves VRAM to the
+        # diffusion model so that doesn't have to stream weights in while computing.
+        backend = "te=cpu,vae=cpu" if config.VAE_DEVICE == "cpu" else "te=cpu"
+        args = [*args, "--backend", backend]
+    if config.SD_SAFE:
+        # The third crash: "device lost" during the first sampling step, a driver reset, and the PC
+        # hung minutes later. Turn off the paths this sd.cpp build picks automatically and that
+        # the RX 580 (no fp16) is least likely to handle: flash attention, direct convolution and
+        # weight prefetch running alongside compute.
+        args = [*args, "--flash-attn", "off", "--conv-direct", "off", "--disable-prefetch"]
     cmd = [exe("sdcpp", "sd-cli.exe"), *args, "-t", config.CPU_THREADS, "-o", out]
-    run(cmd, ctx, label=label, span=span)
+    duty = (config.GPU_REST, config.GPU_MIN_WORK) if config.GPU_REST > 0 else None
+    run(cmd, ctx, label=label, span=span, duty=duty)
     if not out.exists():
         raise RuntimeError(f"sd-cli finished but wrote no {out.name}")
     return out

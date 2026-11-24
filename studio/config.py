@@ -32,6 +32,21 @@ API_KEY = os.getenv("STUDIO_API_KEY", "")
 
 # Threads for CPU-bound engines (whisper.cpp, text encoders kept on the CPU).
 CPU_THREADS = int(os.getenv("STUDIO_CPU_THREADS", str(os.cpu_count() or 4)))
+
+# Where sd.cpp decodes images and video frames: "gpu" (default; tiled and throttled like sampling)
+# or "cpu" (no GPU load at all, but a 544 px decode takes over a minute).
+VAE_DEVICE = os.getenv("STUDIO_VAE_DEVICE", "gpu").lower()
+
+# Conservative sd.cpp settings for the RX 580 (flash attention, direct conv and prefetch off).
+SD_SAFE = os.getenv("STUDIO_SD_SAFE", "1") != "0"
+
+# GPU rest between sd.cpp sampling steps, as a multiple of how long the step took: 1.0 rests as
+# long as it worked (about 50% duty); 0 turns it off. The RX 580 froze the PC after 30-50 s of
+# continuous full load, never in short bursts.
+GPU_REST = float(os.getenv("STUDIO_GPU_REST", "1.0"))
+# Seconds of GPU work to build up before a rest. Sampling steps are longer than this, so they
+# rest after every step; short VAE tiles are grouped.
+GPU_MIN_WORK = float(os.getenv("STUDIO_GPU_MIN_WORK", "4"))
 # Vulkan device index for sd.cpp / llama.cpp. 0 is normally the RX 580 (the Intel iGPU has no Vulkan driver).
 VULKAN_DEVICE = os.getenv("STUDIO_VULKAN_DEVICE", "")
 

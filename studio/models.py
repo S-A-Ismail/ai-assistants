@@ -39,8 +39,10 @@ FILES: list[File] = [
     # --- voice ---
     File("kokoro", "voice/kokoro", 325_532_232, "onnx-community/Kokoro-82M-v1.0-ONNX", "onnx/model.onnx", license="Apache-2.0"),
     # Kokoro voices are fetched as a folder; see VOICE_DIRS below.
-    File("chatterbox-lm", "voice/chatterbox", 172_657, "onnx-community/chatterbox-multilingual-ONNX", "onnx/language_model_fp16.onnx", license="MIT"),
-    File("chatterbox-lm-data", "voice/chatterbox", 1_040_316_416, "onnx-community/chatterbox-multilingual-ONNX", "onnx/language_model_fp16.onnx_data", license="MIT"),
+    # The language model runs on the CPU: DirectML can't execute its GroupQueryAttention nodes.
+    # The 4-bit export is the one built for fast CPU inference.
+    File("chatterbox-lm", "voice/chatterbox", 227_911, "onnx-community/chatterbox-multilingual-ONNX", "onnx/language_model_q4.onnx", license="MIT"),
+    File("chatterbox-lm-data", "voice/chatterbox", 353_621_248, "onnx-community/chatterbox-multilingual-ONNX", "onnx/language_model_q4.onnx_data", license="MIT"),
     File("chatterbox-decoder", "voice/chatterbox", 6_350_448, "onnx-community/chatterbox-multilingual-ONNX", "onnx/conditional_decoder.onnx", license="MIT"),
     File("chatterbox-decoder-data", "voice/chatterbox", 533_970_816, "onnx-community/chatterbox-multilingual-ONNX", "onnx/conditional_decoder.onnx_data", license="MIT"),
     File("chatterbox-embed", "voice/chatterbox", 13_286, "onnx-community/chatterbox-multilingual-ONNX", "onnx/embed_tokens.onnx", license="MIT"),
